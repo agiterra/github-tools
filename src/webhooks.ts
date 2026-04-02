@@ -6,12 +6,13 @@
  * and creates/deletes the GitHub-side webhook via API.
  */
 
+import { createAuthJwt } from "@agiterra/wire-tools/crypto";
 import { prFilter } from "./filters.js";
 
 export type RepoWebhookOptions = {
   wireUrl: string;
   agentId: string;
-  wireAuthToken: string;
+  signingKey: CryptoKey;
   githubToken: string;
   /** Repository in owner/repo format */
   repo: string;
@@ -28,7 +29,7 @@ export type RepoWebhookOptions = {
 export type PrWebhookOptions = {
   wireUrl: string;
   agentId: string;
-  wireAuthToken: string;
+  signingKey: CryptoKey;
   githubToken: string;
   repo: string;
   prNumber: number;
@@ -145,10 +146,11 @@ export async function registerRepoWebhook(opts: RepoWebhookOptions): Promise<Web
     },
   });
 
+  const wireToken = await createAuthJwt(opts.signingKey, opts.agentId, wireBody);
   const wireRes = await fetch(`${opts.wireUrl}/agents/${opts.agentId}/webhooks`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${opts.wireAuthToken}`,
+      Authorization: `Bearer ${wireToken}`,
       "Content-Type": "application/json",
     },
     body: wireBody,
@@ -190,7 +192,7 @@ export async function registerPrWebhook(opts: PrWebhookOptions): Promise<Webhook
   return registerRepoWebhook({
     wireUrl: opts.wireUrl,
     agentId: opts.agentId,
-    wireAuthToken: opts.wireAuthToken,
+    signingKey: opts.signingKey,
     githubToken: opts.githubToken,
     repo: opts.repo,
     name,
@@ -206,18 +208,20 @@ export async function registerPrWebhook(opts: PrWebhookOptions): Promise<Webhook
 export async function unregisterWebhook(opts: {
   wireUrl: string;
   agentId: string;
-  wireAuthToken: string;
+  signingKey: CryptoKey;
   webhookId: number;
 }): Promise<void> {
+  const body = "{}";
+  const token = await createAuthJwt(opts.signingKey, opts.agentId, body);
   const res = await fetch(
     `${opts.wireUrl}/agents/${opts.agentId}/webhooks/${opts.webhookId}`,
     {
       method: "DELETE",
       headers: {
-        Authorization: `Bearer ${opts.wireAuthToken}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: "{}",
+      body,
     },
   );
   if (!res.ok) {
