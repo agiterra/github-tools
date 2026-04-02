@@ -1,9 +1,10 @@
 export {
   registerRepoWebhook,
   registerPrWebhook,
-  unregisterWebhook,
+  deleteGithubWebhook,
   type RepoWebhookOptions,
   type PrWebhookOptions,
+  type WebhookRegistration,
 } from "./webhooks.js";
 
 export {

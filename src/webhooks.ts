@@ -1,37 +1,34 @@
 /**
- * GitHub webhook lifecycle — register, unregister, and helpers.
+ * GitHub webhook lifecycle — register, and helpers.
  *
  * Pure functions. All config via params. No env reads.
- * Generates the Wire webhook payload (validator JS, filter JS, cleanup JS)
- * and creates/deletes the GitHub-side webhook via API.
+ * Creates the GitHub-side webhook and returns the Wire registration payload.
+ * The caller is responsible for Wire auth and sending the request.
  */
 
-import { createAuthJwt } from "@agiterra/wire-tools/crypto";
 import { prFilter } from "./filters.js";
 
 export type RepoWebhookOptions = {
-  wireUrl: string;
-  agentId: string;
-  signingKey: CryptoKey;
   githubToken: string;
   /** Repository in owner/repo format */
   repo: string;
   /** Webhook name (used in Wire URL path) */
   name: string;
+  /** The externally-reachable Wire webhook URL */
+  webhookUrl: string;
   /** GitHub webhook events to subscribe to */
   events: string[];
   /** Filter JS expression. If omitted, all events are delivered. */
   filter?: string;
-  /** Wire webhook URL base (externally-reachable). Defaults to wireUrl. */
-  externalUrl?: string;
 };
 
 export type PrWebhookOptions = {
-  wireUrl: string;
-  agentId: string;
-  signingKey: CryptoKey;
   githubToken: string;
   repo: string;
+  /** The externally-reachable Wire base URL (e.g. ngrok URL) */
+  wireExternalUrl: string;
+  /** Wire agent ID (for URL path) */
+  agentId: string;
   prNumber: number;
   /** Webhook name. Defaults to "{repo-name}-pr-{prNumber}" */
   name?: string;
@@ -39,7 +36,6 @@ export type PrWebhookOptions = {
   extraEvents?: string[];
   /** Extra filter expressions OR'd with the PR filter */
   extraFilters?: string[];
-  externalUrl?: string;
 };
 
 const DEFAULT_PR_EVENTS = [
@@ -88,22 +84,26 @@ if (meta.github_hook_id && meta.repo) {
 `.trim();
 }
 
-type WebhookResult = {
-  wireWebhookId: number;
-  wireWebhookUrl: string;
+export type WebhookRegistration = {
+  /** The Wire webhook registration body — caller signs and POSTs to Wire */
+  wireBody: Record<string, unknown>;
+  /** GitHub hook ID (for reference) */
   githubHookId: number;
+  /** Webhook name */
   name: string;
 };
 
 /**
- * Register a GitHub webhook with full control over events and filter.
+ * Create a GitHub webhook and return the Wire registration payload.
+ *
+ * 1. Creates the webhook on GitHub via API
+ * 2. Returns the Wire registration body — caller is responsible for
+ *    signing (JWT) and POSTing to Wire's webhook registration endpoint.
  */
-export async function registerRepoWebhook(opts: RepoWebhookOptions): Promise<WebhookResult> {
-  const externalUrl = opts.externalUrl ?? opts.wireUrl;
+export async function registerRepoWebhook(opts: RepoWebhookOptions): Promise<WebhookRegistration> {
   const webhookSecret = crypto.randomUUID();
-  const wireWebhookUrl = `${externalUrl}/webhooks/${opts.agentId}/github/${opts.name}`;
 
-  // 1. Create GitHub webhook
+  // Create GitHub webhook
   const ghRes = await fetch(`https://api.github.com/repos/${opts.repo}/hooks`, {
     method: "POST",
     headers: {
@@ -113,7 +113,7 @@ export async function registerRepoWebhook(opts: RepoWebhookOptions): Promise<Web
     },
     body: JSON.stringify({
       config: {
-        url: wireWebhookUrl,
+        url: opts.webhookUrl,
         content_type: "json",
         secret: webhookSecret,
       },
@@ -129,102 +129,70 @@ export async function registerRepoWebhook(opts: RepoWebhookOptions): Promise<Web
 
   const ghHook = (await ghRes.json()) as { id: number };
 
-  // 2. Register on Wire
-  const wireBody = JSON.stringify({
-    plugin: "github",
-    name: opts.name,
-    validator: hmacValidatorCode(),
-    filter: opts.filter ?? undefined,
-    cleanup: cleanupCode(),
-    meta: {
-      repo: opts.repo,
-      github_hook_id: ghHook.id,
-    },
-    secrets: {
-      webhook_secret: webhookSecret,
-      github_token: opts.githubToken,
-    },
-  });
-
-  const wireToken = await createAuthJwt(opts.signingKey, opts.agentId, wireBody);
-  const wireRes = await fetch(`${opts.wireUrl}/agents/${opts.agentId}/webhooks`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${wireToken}`,
-      "Content-Type": "application/json",
-    },
-    body: wireBody,
-  });
-
-  if (!wireRes.ok) {
-    // Roll back GitHub webhook
-    await fetch(`https://api.github.com/repos/${opts.repo}/hooks/${ghHook.id}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${opts.githubToken}`, "User-Agent": "wire-github-tools" },
-    }).catch(() => {});
-    const detail = await wireRes.text();
-    throw new Error(`Wire webhook registration failed (${wireRes.status}): ${detail}`);
-  }
-
-  const wireHook = (await wireRes.json()) as { webhook_id: number };
-
   return {
-    wireWebhookId: wireHook.webhook_id,
-    wireWebhookUrl,
+    wireBody: {
+      plugin: "github",
+      name: opts.name,
+      validator: hmacValidatorCode(),
+      filter: opts.filter ?? undefined,
+      cleanup: cleanupCode(),
+      meta: {
+        repo: opts.repo,
+        github_hook_id: ghHook.id,
+      },
+      secrets: {
+        webhook_secret: webhookSecret,
+        github_token: opts.githubToken,
+      },
+    },
     githubHookId: ghHook.id,
     name: opts.name,
   };
 }
 
 /**
- * Register a GitHub webhook for PR monitoring.
+ * Create a GitHub webhook for PR monitoring.
  * Convenience wrapper over registerRepoWebhook with PR-specific defaults.
  */
-export async function registerPrWebhook(opts: PrWebhookOptions): Promise<WebhookResult> {
+export async function registerPrWebhook(opts: PrWebhookOptions): Promise<WebhookRegistration> {
   const repoName = opts.repo.split("/").pop() ?? opts.repo;
   const name = opts.name ?? `${repoName}-pr-${opts.prNumber}`;
-
   const events = [...DEFAULT_PR_EVENTS, ...(opts.extraEvents ?? [])];
-
   const filters = [prFilter(opts.prNumber), ...(opts.extraFilters ?? [])];
   const filter = filters.map((f) => `(${f})`).join(" || ");
+  const webhookUrl = `${opts.wireExternalUrl}/webhooks/${opts.agentId}/github/${name}`;
 
   return registerRepoWebhook({
-    wireUrl: opts.wireUrl,
-    agentId: opts.agentId,
-    signingKey: opts.signingKey,
     githubToken: opts.githubToken,
     repo: opts.repo,
     name,
+    webhookUrl,
     events,
     filter,
-    externalUrl: opts.externalUrl,
   });
 }
 
 /**
- * Unregister a webhook from Wire (runs cleanup JS → deletes GitHub hook).
+ * Delete a GitHub webhook directly via API.
+ * Use this for manual cleanup. For Wire-managed cleanup, delete the
+ * Wire webhook registration instead (the cleanup JS handles it).
  */
-export async function unregisterWebhook(opts: {
-  wireUrl: string;
-  agentId: string;
-  signingKey: CryptoKey;
-  webhookId: number;
+export async function deleteGithubWebhook(opts: {
+  githubToken: string;
+  repo: string;
+  hookId: number;
 }): Promise<void> {
-  const body = "{}";
-  const token = await createAuthJwt(opts.signingKey, opts.agentId, body);
   const res = await fetch(
-    `${opts.wireUrl}/agents/${opts.agentId}/webhooks/${opts.webhookId}`,
+    `https://api.github.com/repos/${opts.repo}/hooks/${opts.hookId}`,
     {
       method: "DELETE",
       headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
+        Authorization: `Bearer ${opts.githubToken}`,
+        "User-Agent": "wire-github-tools",
       },
-      body,
     },
   );
-  if (!res.ok) {
-    throw new Error(`Wire webhook deletion failed (${res.status}): ${await res.text()}`);
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`GitHub webhook deletion failed (${res.status}): ${await res.text()}`);
   }
 }
