@@ -136,6 +136,7 @@ export async function registerRepoWebhook(opts: RepoWebhookOptions): Promise<Web
       validator: hmacValidatorCode(),
       filter: opts.filter ?? undefined,
       cleanup: cleanupCode(),
+      dedup: 'headers["x-github-delivery"]',
       meta: {
         repo: opts.repo,
         github_hook_id: ghHook.id,
