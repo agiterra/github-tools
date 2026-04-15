@@ -10,7 +10,7 @@
  *   WIRE_URL             default http://localhost:9800
  *   WIRE_EXTERNAL_URL    externally-reachable Wire URL (e.g. ngrok)
  *   AGENT_ID             required
- *   WIRE_PRIVATE_KEY     or CREW_PRIVATE_KEY — for Wire API auth
+ *   AGENT_PRIVATE_KEY    Ed25519 PKCS8 base64 (required for Wire API auth)
  *   GITHUB_TOKEN         default GitHub token (admin:repo_hook scope)
  */
 
@@ -204,7 +204,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 export async function startServer(): Promise<void> {
-  const rawKey = process.env.CREW_PRIVATE_KEY ?? process.env.WIRE_PRIVATE_KEY;
+  const rawKey = process.env.AGENT_PRIVATE_KEY;
   if (!rawKey) {
     console.error("[github] no private key — Wire auth disabled");
   } else {
