@@ -1,6 +1,6 @@
 {
   "name": "@agiterra/github-tools",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "GitHub webhook lifecycle helpers — register, filter, validate, cleanup. Pure functions, no env reads.",
   "type": "module",
   "main": "./src/index.ts",
@@ -10,7 +10,10 @@
   "files": [
     "src/"
   ],
-  "dependencies": {},
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@agiterra/wire-tools": "agiterra/wire-tools#v1.0.0"
+  },
   "devDependencies": {
     "bun-types": "latest"
   },

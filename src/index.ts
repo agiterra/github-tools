@@ -15,3 +15,6 @@ export {
   botFilter,
   anyOf,
 } from "./filters.js";
+
+// MCP server (shared by claude-code and codex adapters)
+export { startServer } from "./mcp-server.js";
