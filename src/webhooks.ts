@@ -6,7 +6,25 @@
  * The caller is responsible for Wire auth and sending the request.
  */
 
-import { prFilter } from "./filters.js";
+import { prFilter, defaultBranchWorkflowRunFilter } from "./filters.js";
+
+/** Fetch the repo's default branch via GitHub REST. */
+async function fetchDefaultBranch(repo: string, token: string): Promise<string> {
+  const res = await fetch(`https://api.github.com/repos/${repo}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "wire-github-tools",
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`fetch repo ${repo} failed (${res.status}): ${await res.text()}`);
+  }
+  const data = (await res.json()) as { default_branch?: string };
+  if (!data.default_branch) {
+    throw new Error(`repo ${repo} response missing default_branch`);
+  }
+  return data.default_branch;
+}
 
 export type RepoWebhookOptions = {
   githubToken: string;
@@ -159,7 +177,19 @@ export async function registerPrWebhook(opts: PrWebhookOptions): Promise<Webhook
   const repoName = opts.repo.split("/").pop() ?? opts.repo;
   const name = opts.name ?? `${repoName}-pr-${opts.prNumber}`;
   const events = [...DEFAULT_PR_EVENTS, ...(opts.extraEvents ?? [])];
-  const filters = [prFilter(opts.prNumber), ...(opts.extraFilters ?? [])];
+
+  // Catch post-merge workflow_run events on the default branch. Without this
+  // clause, deploy workflows that fire after squash-merge are dropped — their
+  // payload has no PR linkage so prFilter() returns false. Engineer would sit
+  // blind through the merge → staging-verified window. Profiterole hit this
+  // on ENG-3024 PR #1500 (2026-04-28).
+  const defaultBranch = await fetchDefaultBranch(opts.repo, opts.githubToken);
+
+  const filters = [
+    prFilter(opts.prNumber),
+    defaultBranchWorkflowRunFilter(defaultBranch),
+    ...(opts.extraFilters ?? []),
+  ];
   const filter = filters.map((f) => `(${f})`).join(" || ");
   const webhookUrl = `${opts.wireExternalUrl}/webhooks/${opts.agentId}/github/${name}`;
 
