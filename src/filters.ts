@@ -18,20 +18,44 @@ export function prFilter(prNumber: number): string {
 }
 
 /**
- * Match workflow_run events on the repo's default branch.
+ * Match workflow_run events scoped to a specific PR's lifecycle.
  *
- * Used by `registerPrWebhook` to catch post-merge deploy workflows. After a
- * squash-merge to main, GitHub Actions emits workflow_run events whose
- * payload has no `pull_request`/`issue`/`check_run.pull_requests` linkage —
- * `prFilter` alone drops them. With this added, the engineer who registered
- * the PR webhook still sees their merge's Deploy-to-Staging completion.
+ * Two clauses OR'd together — one for pre-merge, one for post-merge:
  *
- * Cost: events from OTHER PRs' post-merge workflows on the same repo also
- * pass during the engineer's session. Acceptable; missing the deploy event
- * is a silent failure that bites every engineer.
+ * - Pre-merge: workflow_run.head_branch === the PR's head ref. Catches CI
+ *   workflows triggered by pushes to the PR branch.
+ *
+ * - Post-merge: workflow_run.head_branch === the default branch AND
+ *   head_commit.message includes "(#<N>)". GitHub's squash-merge and
+ *   merge-commit styles both put "(#<PR-number>)" in the merge commit
+ *   message, so this scopes default-branch workflow_runs to ONLY the ones
+ *   triggered by THIS PR's merge — not other PRs landing in parallel.
+ *
+ *   If `deployWorkflowName` is provided, also require workflow_run.name to
+ *   match it — useful when the engineer cares about a specific workflow
+ *   like "Deploy to Staging" and wants to drop unrelated post-merge runs
+ *   (CI re-runs on main, scheduled jobs, etc.).
+ *
+ * Known limitation: rebase-merge to the default branch fans out the
+ * original commit messages without injecting "(#<N>)". Post-merge
+ * workflows in that case won't match. Rebase-merge to default branches is
+ * uncommon; document the gap rather than fight it.
  */
-export function defaultBranchWorkflowRunFilter(defaultBranch: string): string {
-  return `headers["x-github-event"] === "workflow_run" && payload.workflow_run?.head_branch === ${JSON.stringify(defaultBranch)}`;
+export function prScopedWorkflowRunFilter(opts: {
+  prNumber: number;
+  prHeadRef: string;
+  defaultBranch: string;
+  deployWorkflowName?: string;
+}): string {
+  const isWorkflowRun = `headers["x-github-event"] === "workflow_run"`;
+  const preMerge = `payload.workflow_run?.head_branch === ${JSON.stringify(opts.prHeadRef)}`;
+  const postMergeBranch = `payload.workflow_run?.head_branch === ${JSON.stringify(opts.defaultBranch)}`;
+  const mergeCommitTag = `payload.workflow_run?.head_commit?.message?.includes("(#${opts.prNumber})")`;
+  const deployName = opts.deployWorkflowName
+    ? ` && payload.workflow_run?.name === ${JSON.stringify(opts.deployWorkflowName)}`
+    : "";
+  const postMerge = `(${postMergeBranch} && ${mergeCommitTag}${deployName})`;
+  return `${isWorkflowRun} && (${preMerge} || ${postMerge})`;
 }
 
 /** Match workflow_run completions for a specific workflow name. */

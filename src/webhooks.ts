@@ -6,24 +6,37 @@
  * The caller is responsible for Wire auth and sending the request.
  */
 
-import { prFilter, defaultBranchWorkflowRunFilter } from "./filters.js";
+import { prFilter, prScopedWorkflowRunFilter } from "./filters.js";
 
-/** Fetch the repo's default branch via GitHub REST. */
-async function fetchDefaultBranch(repo: string, token: string): Promise<string> {
-  const res = await fetch(`https://api.github.com/repos/${repo}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "User-Agent": "wire-github-tools",
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`fetch repo ${repo} failed (${res.status}): ${await res.text()}`);
+/** Fetch the repo's default branch + the PR's head ref via GitHub REST. */
+async function fetchPrContext(
+  repo: string,
+  prNumber: number,
+  token: string,
+): Promise<{ defaultBranch: string; prHeadRef: string }> {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "User-Agent": "wire-github-tools",
+  };
+  const [repoRes, prRes] = await Promise.all([
+    fetch(`https://api.github.com/repos/${repo}`, { headers }),
+    fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}`, { headers }),
+  ]);
+  if (!repoRes.ok) {
+    throw new Error(`fetch repo ${repo} failed (${repoRes.status}): ${await repoRes.text()}`);
   }
-  const data = (await res.json()) as { default_branch?: string };
-  if (!data.default_branch) {
+  if (!prRes.ok) {
+    throw new Error(`fetch PR ${repo}#${prNumber} failed (${prRes.status}): ${await prRes.text()}`);
+  }
+  const repoData = (await repoRes.json()) as { default_branch?: string };
+  const prData = (await prRes.json()) as { head?: { ref?: string } };
+  if (!repoData.default_branch) {
     throw new Error(`repo ${repo} response missing default_branch`);
   }
-  return data.default_branch;
+  if (!prData.head?.ref) {
+    throw new Error(`PR ${repo}#${prNumber} response missing head.ref`);
+  }
+  return { defaultBranch: repoData.default_branch, prHeadRef: prData.head.ref };
 }
 
 export type RepoWebhookOptions = {
@@ -54,6 +67,14 @@ export type PrWebhookOptions = {
   extraEvents?: string[];
   /** Extra filter expressions OR'd with the PR filter */
   extraFilters?: string[];
+  /**
+   * Optional deploy workflow name (e.g. "Deploy to Staging"). When set, the
+   * post-merge workflow_run filter additionally requires
+   * workflow_run.name === this value, scoping default-branch matches to
+   * only the engineer's deploy event. When omitted, ALL post-merge
+   * workflow_runs whose head_commit.message contains "(#<prNumber>)" pass.
+   */
+  deployWorkflowName?: string;
 };
 
 const DEFAULT_PR_EVENTS = [
@@ -178,16 +199,29 @@ export async function registerPrWebhook(opts: PrWebhookOptions): Promise<Webhook
   const name = opts.name ?? `${repoName}-pr-${opts.prNumber}`;
   const events = [...DEFAULT_PR_EVENTS, ...(opts.extraEvents ?? [])];
 
-  // Catch post-merge workflow_run events on the default branch. Without this
-  // clause, deploy workflows that fire after squash-merge are dropped — their
-  // payload has no PR linkage so prFilter() returns false. Engineer would sit
-  // blind through the merge → staging-verified window. Profiterole hit this
-  // on ENG-3024 PR #1500 (2026-04-28).
-  const defaultBranch = await fetchDefaultBranch(opts.repo, opts.githubToken);
+  // Scope post-merge workflow_run capture to THIS PR's lifecycle:
+  //   - pre-merge: workflow_runs on the PR's head_ref
+  //   - post-merge: workflow_runs on default_branch whose head_commit
+  //     message contains "(#<prNumber>)" (squash and merge-commit
+  //     conventions both inject this), optionally narrowed further by
+  //     workflow_run.name when deployWorkflowName is provided.
+  // Without these clauses, prFilter() drops events that have no PR
+  // linkage in payload — the silent-blind-through-deploy gap reported by
+  // Profiterole on ENG-3024 PR #1500 (2026-04-28).
+  const { defaultBranch, prHeadRef } = await fetchPrContext(
+    opts.repo,
+    opts.prNumber,
+    opts.githubToken,
+  );
 
   const filters = [
     prFilter(opts.prNumber),
-    defaultBranchWorkflowRunFilter(defaultBranch),
+    prScopedWorkflowRunFilter({
+      prNumber: opts.prNumber,
+      prHeadRef,
+      defaultBranch,
+      deployWorkflowName: opts.deployWorkflowName,
+    }),
     ...(opts.extraFilters ?? []),
   ];
   const filter = filters.map((f) => `(${f})`).join(" || ");
