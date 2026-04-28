@@ -48,7 +48,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "register_pr_webhook",
       description:
         "Register a GitHub webhook to monitor a PR. Creates the hook on GitHub " +
-        "and registers it on Wire with HMAC validation and PR number filtering.",
+        "and registers it on Wire with HMAC validation and PR-scoped filtering. " +
+        "Catches both pre-merge events (CI on the PR branch) and post-merge " +
+        "events (workflows triggered by the merge commit on the default branch). " +
+        "Pass deploy_workflow_name to scope post-merge matches to a specific deploy " +
+        "workflow (e.g. 'Deploy to Staging') and drop unrelated post-merge runs.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -56,6 +60,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           pr_number: { type: "number", description: "PR number to monitor" },
           name: { type: "string", description: "Optional webhook name. Defaults to '{repo-name}-pr-{number}'" },
           filter: { type: "string", description: "Extra JS filter expression OR'd with the built-in PR filter. Vars: headers, payload." },
+          deploy_workflow_name: {
+            type: "string",
+            description:
+              "Optional GitHub Actions workflow name (e.g. 'Deploy to Staging'). " +
+              "When set, post-merge workflow_run matches additionally require " +
+              "workflow_run.name === this value. Omit to receive ALL post-merge " +
+              "workflows tagged with the PR number in the merge commit message.",
+          },
           github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
         },
         required: ["repo", "pr_number"],
@@ -132,6 +144,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         wireExternalUrl: WIRE_EXTERNAL_URL,
         name: a.name as string | undefined,
         extraFilters,
+        deployWorkflowName: a.deploy_workflow_name as string | undefined,
       });
 
       // Register on Wire
