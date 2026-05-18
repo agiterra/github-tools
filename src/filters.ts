@@ -8,12 +8,26 @@
  * Compose filters with || for OR logic.
  */
 
-/** Match events for a specific PR number (check_run, pull_request, issue_comment, review). */
+/**
+ * Match events for a specific PR number (check_run, pull_request, issue_comment, review).
+ *
+ * The check_run clause additionally requires `action === "completed"` —
+ * GitHub fires a check_run event for *every* job state transition
+ * (`created`, `completed`, sometimes `rerequested`). A PR with N check jobs
+ * across M CI rebuilds produces ~2NM check_run events, of which only the
+ * NM `completed` ones carry actionable result information. Dropping the
+ * `created` half cuts agent context burn roughly in half for an active PR
+ * with no information loss — engineers only care about the result, not
+ * the start.
+ *
+ * Fixed 2026-05-18 after Eclair3 took 107 webhook events in one hour on
+ * a single PR, ~30 of them check_run.created noise.
+ */
 export function prFilter(prNumber: number): string {
   return [
     `payload.pull_request?.number === ${prNumber}`,
     `payload.issue?.number === ${prNumber}`,
-    `payload.check_run?.pull_requests?.some(pr => pr.number === ${prNumber})`,
+    `(payload.check_run?.pull_requests?.some(pr => pr.number === ${prNumber}) && payload.action === "completed")`,
   ].join(" || ");
 }
 
