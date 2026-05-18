@@ -16,5 +16,12 @@ export {
   anyOf,
 } from "./filters.js";
 
+export {
+  checkPrRebaseState,
+  type MergeableState,
+  type RebaseCheckResult,
+  type CheckRebaseOptions,
+} from "./rebase.js";
+
 // MCP server (shared by claude-code and codex adapters)
 export { startServer } from "./mcp-server.js";

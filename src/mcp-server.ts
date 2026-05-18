@@ -20,7 +20,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { registerPrWebhook, registerRepoWebhook, deleteGithubWebhook } from "./index.js";
+import { registerPrWebhook, registerRepoWebhook, deleteGithubWebhook, checkPrRebaseState } from "./index.js";
 import { createAuthJwt, importPrivateKey } from "@agiterra/wire-tools/crypto";
 
 const WIRE_URL = process.env.WIRE_URL ?? "http://localhost:9800";
@@ -87,6 +87,35 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
         },
         required: ["repo", "name", "events"],
+      },
+    },
+    {
+      name: "check_pr_rebase",
+      description:
+        "Check whether a PR needs a rebase. Reads GitHub's `mergeable_state` " +
+        "field (same signal as the 'This branch has conflicts that must be " +
+        "resolved' banner on github.com).\n\n" +
+        "GitHub computes mergeable_state lazily — the first poll after a base- " +
+        "branch push often returns null ('computing'). This tool retries with " +
+        "backoff up to ~52s total before settling.\n\n" +
+        "Returns { state, needs_rebase, message, attempts, pr_url }. The " +
+        "`needs_rebase` boolean is true only when state === 'dirty' " +
+        "(actual conflicts that must be resolved). Other non-clean states " +
+        "(behind, blocked, unstable, etc.) are reported but don't set " +
+        "needs_rebase=true — those are the engineer's call.\n\n" +
+        "Use case: agents receiving a pull_request.synchronize webhook event " +
+        "call this on their own PR to learn whether they need to rebase, then " +
+        "act (rebase locally + force-push) or relay the message to their " +
+        "operator.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          repo: { type: "string", description: "Repository in owner/repo format" },
+          pr_number: { type: "number", description: "PR number to check" },
+          github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
+        },
+        required: ["repo", "pr_number"],
+        additionalProperties: false,
       },
     },
     {
@@ -200,6 +229,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           type: "text" as const,
           text: `Webhook registered: ${result.name}\nWire ID: ${wireHook.webhook_id}\nGitHub hook ID: ${result.githubHookId}`,
         }],
+      };
+    }
+
+    if (name === "check_pr_rebase") {
+      const token = (a.github_token as string) || GITHUB_TOKEN;
+      if (!token) throw new Error("no GitHub token — set GITHUB_TOKEN or pass github_token param");
+      const result = await checkPrRebaseState({
+        repo: a.repo as string,
+        prNumber: a.pr_number as number,
+        githubToken: token,
+      });
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
     }
 
