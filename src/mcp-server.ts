@@ -91,11 +91,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "unregister_webhook",
-      description: "Delete a Wire webhook registration. Runs cleanup code to delete the GitHub hook.",
+      description:
+        "Delete a Wire webhook registration. Runs the webhook's cleanup code (typically deletes the GitHub hook). " +
+        "Optionally pass `agent_id` to target another agent's webhook — useful for operators / housekeeping agents " +
+        "tidying up stale registrations owned by an offline or out-of-context agent. Wire authorizes any registered " +
+        "agent's JWT for this endpoint; the URL path's `:agent_id` locks the target.",
       inputSchema: {
         type: "object" as const,
         properties: {
           webhook_id: { type: "number", description: "Wire webhook ID (returned by register_*)" },
+          agent_id: {
+            type: "string",
+            description: "Optional. ID of the agent that owns the webhook. Defaults to the caller's AGENT_ID — only set this when cleaning up someone else's webhook.",
+          },
         },
         required: ["webhook_id"],
       },
@@ -198,12 +206,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (name === "unregister_webhook") {
       const webhookId = a.webhook_id as number;
       if (!webhookId) throw new Error("missing webhook_id");
-
-      const res = await wireDelete(`/agents/${AGENT_ID}/webhooks/${webhookId}`);
+      // Caller's AGENT_ID is the default owner; override via `agent_id`
+      // when cleaning up another agent's webhook. Wire's endpoint accepts
+      // any registered agent's JWT for the auth gate, then enforces that
+      // the URL path's agent_id matches the webhook's owner row.
+      const ownerId = (a.agent_id as string | undefined) ?? AGENT_ID;
+      const res = await wireDelete(`/agents/${ownerId}/webhooks/${webhookId}`);
       if (!res.ok) throw new Error(`Wire deletion failed (${res.status}): ${await res.text()}`);
 
       return {
-        content: [{ type: "text" as const, text: `Webhook ${webhookId} deleted` }],
+        content: [{ type: "text" as const, text: `Webhook ${webhookId} deleted (owner=${ownerId})` }],
       };
     }
 
