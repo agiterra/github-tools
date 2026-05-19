@@ -59,7 +59,31 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           repo: { type: "string", description: "Repository in owner/repo format" },
           pr_number: { type: "number", description: "PR number to monitor" },
           name: { type: "string", description: "Optional webhook name. Defaults to '{repo-name}-pr-{number}'" },
-          filter: { type: "string", description: "Extra JS filter expression OR'd with the built-in PR filter. Vars: headers, payload." },
+          filter: {
+            type: "string",
+            description:
+              "Extra JS filter expression OR'd with the built-in PR filter. Vars: headers, payload.\n\n" +
+              "TRAP: this is OR'd at the TOP level with the built-in PR-scoped filter. " +
+              "If your expression isn't scoped to THIS PR, it fires on matching events across the WHOLE repo. " +
+              "Tiramisu's PR 1566 webhook hit this 2026-05-19 — passed an unscoped " +
+              "`pull_request_review || issue_comment` clause and started receiving every PR's reviews in fabrica-v3 " +
+              "(40+ workflow_run + 40+ check_run per hour, agent compacted every minute).\n\n" +
+              "How to scope to THIS PR (use these patterns inside your filter):\n" +
+              "  - pull_request_review / pull_request_review_comment: `payload.pull_request?.number === <N>`\n" +
+              "  - issue_comment (PR comments fire as issue_comment in GH's model): `payload.issue?.number === <N>`\n" +
+              "  - check_run / check_suite: `payload.check_run?.pull_requests?.some(p => p.number === <N>)` (same shape for check_suite)\n" +
+              "  - workflow_run: `payload.workflow_run?.pull_requests?.some(p => p.number === <N>)` or " +
+              "`payload.workflow_run?.head_commit?.message?.includes('(#<N>)')` for post-merge\n\n" +
+              "Legitimately UNSCOPED filters: events on `main` like 'Deploy to Staging' / 'Deploy to Production' " +
+              "workflow runs are not tied to a single PR. For those, narrow by workflow name + branch instead of PR " +
+              "number, e.g. `headers['x-github-event'] === 'workflow_run' && payload.workflow_run?.name === 'Deploy to Staging' && " +
+              "payload.workflow_run?.head_branch === 'main' && payload.action === 'completed'`. These are NARROW even " +
+              "though unscoped-from-PR; the bug is broad-and-unscoped, not unscoped per se.\n\n" +
+              "Quick recipe — failed checks ONLY for this PR: " +
+              "`headers['x-github-event'] === 'check_run' && payload.action === 'completed' && payload.check_run?.conclusion === 'failure' && payload.check_run?.pull_requests?.some(p => p.number === <N>)`.\n\n" +
+              "Built-in PR filter already covers: pull_request #N, issue #N (incl. PR comments), check_run.completed for PR #N, " +
+              "workflow_run pre/post-merge for PR #N. Use `filter` only to ADD beyond these defaults.",
+          },
           deploy_workflow_name: {
             type: "string",
             description:
