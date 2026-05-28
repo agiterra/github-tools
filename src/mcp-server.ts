@@ -20,7 +20,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { registerPrWebhook, registerRepoWebhook, deleteGithubWebhook, checkPrRebaseState } from "./index.js";
+import { registerPrWebhook, registerRepoWebhook, deleteGithubWebhook, checkPrRebaseState, setBriocheGate } from "./index.js";
 import { createAuthJwt, importPrivateKey } from "@agiterra/wire-tools/crypto";
 
 const WIRE_URL = process.env.WIRE_URL ?? "http://localhost:9800";
@@ -139,6 +139,42 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
         },
         required: ["repo", "pr_number"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "gate_set",
+      description:
+        "Set the `brioche/gates` commit-status on a PR's head commit. Used by Brioche " +
+        "as a deterministic merge-gate: branch protection requires `brioche/gates` to pass, " +
+        "and only Brioche flips it to success after auditing the two skip-prone gates " +
+        "(adversarial 10-review + local-services verification).\n\n" +
+        "Resolves the PR's current head SHA, then POSTs to /repos/{repo}/statuses/{sha} with " +
+        "context='brioche/gates'. Requires `statuses:write` on the GitHub token (App " +
+        "installations need the Commit statuses permission).\n\n" +
+        "States: pending (audit not yet complete — blocks merge), success (audit passed — clears the gate), " +
+        "failure (audit found a problem — blocks merge with reason), error (tooling/auth failure — investigate).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          repo: { type: "string", description: "Repository in owner/repo format" },
+          pr_number: { type: "number", description: "PR number to gate" },
+          state: {
+            type: "string",
+            enum: ["pending", "success", "failure", "error"],
+            description: "Status state. `success` = audit passed (clears the gate). `pending` / `failure` block merge.",
+          },
+          description: {
+            type: "string",
+            description: "Optional human-readable note (≤140 chars, truncated otherwise). Shown next to the gate in the PR check list. Use for the audit verdict — e.g. 'reviewers ok; local-services verified at sha abc1234'.",
+          },
+          target_url: {
+            type: "string",
+            description: "Optional URL for the 'Details' link on the check. Useful for linking to a Slack thread or audit log.",
+          },
+          github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
+        },
+        required: ["repo", "pr_number", "state"],
         additionalProperties: false,
       },
     },
@@ -266,6 +302,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       });
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      };
+    }
+
+    if (name === "gate_set") {
+      const token = (a.github_token as string) || GITHUB_TOKEN;
+      if (!token) throw new Error("no GitHub token — set GITHUB_TOKEN or pass github_token param");
+      const result = await setBriocheGate({
+        githubToken: token,
+        repo: a.repo as string,
+        prNumber: a.pr_number as number,
+        state: a.state as "pending" | "success" | "failure" | "error",
+        description: a.description as string | undefined,
+        target_url: a.target_url as string | undefined,
+      });
+      return {
+        content: [{
+          type: "text" as const,
+          text: `brioche/gates set to ${result.state} on ${a.repo}#${a.pr_number}\nhead SHA: ${result.sha}\nstatus url: ${result.url}`,
+        }],
       };
     }
 
