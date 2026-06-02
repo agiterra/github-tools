@@ -11,7 +11,9 @@
  *   WIRE_EXTERNAL_URL    externally-reachable Wire URL (e.g. ngrok)
  *   AGENT_ID             required
  *   AGENT_PRIVATE_KEY    Ed25519 PKCS8 base64 (required for Wire API auth)
- *   GITHUB_TOKEN         default GitHub token (admin:repo_hook scope)
+ *   GITHUB_TOKEN         default GitHub token (admin:repo_hook scope). If unset,
+ *                        the plugin falls back to `gh auth token` from the gh CLI
+ *                        (so worktrees where gh-app-token.sh authed gh just work).
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -29,6 +31,39 @@ const AGENT_ID = process.env.AGENT_ID ?? "";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 
 let signingKey: CryptoKey | null = null;
+
+// Resolve a GitHub token at call time. Precedence: explicit per-call token >
+// GITHUB_TOKEN env > `gh auth token` from the gh CLI.
+//
+// The gh fallback exists because spawned engineers run in worktrees where
+// gh-app-token.sh has already authenticated the gh CLI, but the plugin's MCP
+// env carries no GITHUB_TOKEN — so register_pr_webhook failed "no GitHub token"
+// despite gh working fine (Brioche crop 2026-06-01). Reusing gh's auth avoids
+// provisioning the GH-App private key into every spawn env, where a static
+// installation token would also expire ~1h mid-session.
+async function ghCliToken(): Promise<string | null> {
+  try {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { stdout } = await promisify(execFile)("gh", ["auth", "token"], { timeout: 5000 });
+    const t = stdout.trim();
+    return t.length > 0 ? t : null;
+  } catch {
+    // gh not on PATH / not authenticated / timed out — fall through to the
+    // no-token error in resolveGithubToken.
+    return null;
+  }
+}
+
+async function resolveGithubToken(perCall?: string): Promise<string> {
+  const token = perCall || GITHUB_TOKEN || (await ghCliToken());
+  if (!token) {
+    throw new Error(
+      "no GitHub token — set GITHUB_TOKEN, pass github_token, or authenticate the gh CLI (gh auth login / gh-app-token.sh in the worktree)",
+    );
+  }
+  return token;
+}
 
 const mcp = new Server(
   { name: "github-webhooks", version: "0.1.0" },
@@ -229,8 +264,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   try {
     if (name === "register_pr_webhook") {
-      const token = (a.github_token as string) || GITHUB_TOKEN;
-      if (!token) throw new Error("no GitHub token — set GITHUB_TOKEN or pass github_token param");
+      const token = await resolveGithubToken(a.github_token as string | undefined);
 
       const extraFilters = a.filter ? [a.filter as string] : undefined;
       const result = await registerPrWebhook({
@@ -263,8 +297,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     if (name === "register_repo_webhook") {
-      const token = (a.github_token as string) || GITHUB_TOKEN;
-      if (!token) throw new Error("no GitHub token — set GITHUB_TOKEN or pass github_token param");
+      const token = await resolveGithubToken(a.github_token as string | undefined);
 
       const webhookUrl = `${WIRE_EXTERNAL_URL}/webhooks/${AGENT_ID}/github/${a.name}`;
       const result = await registerRepoWebhook({
@@ -293,8 +326,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     if (name === "check_pr_rebase") {
-      const token = (a.github_token as string) || GITHUB_TOKEN;
-      if (!token) throw new Error("no GitHub token — set GITHUB_TOKEN or pass github_token param");
+      const token = await resolveGithubToken(a.github_token as string | undefined);
       const result = await checkPrRebaseState({
         repo: a.repo as string,
         prNumber: a.pr_number as number,
@@ -306,8 +338,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     if (name === "gate_set") {
-      const token = (a.github_token as string) || GITHUB_TOKEN;
-      if (!token) throw new Error("no GitHub token — set GITHUB_TOKEN or pass github_token param");
+      const token = await resolveGithubToken(a.github_token as string | undefined);
       const result = await setBriocheGate({
         githubToken: token,
         repo: a.repo as string,
@@ -358,7 +389,7 @@ export async function startServer(): Promise<void> {
   }
 
   if (!AGENT_ID) console.error("[github] no AGENT_ID — tools will fail");
-  if (!GITHUB_TOKEN) console.error("[github] no GITHUB_TOKEN — agents must pass github_token param");
+  if (!GITHUB_TOKEN) console.error("[github] no GITHUB_TOKEN — will fall back to `gh auth token`, or agents can pass github_token param");
 
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
