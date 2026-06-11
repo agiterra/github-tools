@@ -11,9 +11,18 @@
  *   WIRE_EXTERNAL_URL    externally-reachable Wire URL (e.g. ngrok)
  *   AGENT_ID             required
  *   AGENT_PRIVATE_KEY    Ed25519 PKCS8 base64 (required for Wire API auth)
- *   GITHUB_TOKEN         default GitHub token (admin:repo_hook scope). If unset,
- *                        the plugin falls back to `gh auth token` from the gh CLI
- *                        (so worktrees where gh-app-token.sh authed gh just work).
+ *   GITHUB_APP_TOKEN_CMD command that prints a fresh GitHub token on stdout
+ *                        (e.g. the gh-app-token.sh mint script). Preferred
+ *                        source: exec'd on demand and cached ~50min, so a
+ *                        long-lived MCP server never holds an expired ~1h
+ *                        installation token (the 2026-06-10/11 401 class —
+ *                        a stale static GITHUB_TOKEN outranked the WORKING
+ *                        gh fallback and 401'd every webhook registration).
+ *   GITHUB_TOKEN         static fallback token (admin:repo_hook scope).
+ *                        WARNING: installation tokens expire in ~1h; prefer
+ *                        GITHUB_APP_TOKEN_CMD for anything long-running.
+ *                        If unset, falls back to `gh auth token` from the gh
+ *                        CLI (worktrees where gh-app-token.sh authed gh).
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -29,8 +38,35 @@ const WIRE_URL = process.env.WIRE_URL ?? "http://localhost:9800";
 const WIRE_EXTERNAL_URL = process.env.WIRE_EXTERNAL_URL ?? WIRE_URL;
 const AGENT_ID = process.env.AGENT_ID ?? "";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
+const GITHUB_APP_TOKEN_CMD = process.env.GITHUB_APP_TOKEN_CMD ?? "";
 
 let signingKey: CryptoKey | null = null;
+
+// Mint-on-demand token cache. GitHub App installation tokens live ~1h;
+// refresh at 50min so a token is never presented near expiry.
+const MINT_TTL_MS = 50 * 60_000;
+let minted: { token: string; at: number } | null = null;
+
+async function mintedAppToken(): Promise<string | null> {
+  if (!GITHUB_APP_TOKEN_CMD) return null;
+  if (minted && Date.now() - minted.at < MINT_TTL_MS) return minted.token;
+  try {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    // bash -c so the CMD can be a script path or a small pipeline.
+    const { stdout } = await promisify(execFile)("bash", ["-c", GITHUB_APP_TOKEN_CMD], { timeout: 30_000 });
+    const t = stdout.trim();
+    if (!t) throw new Error("command printed no token");
+    minted = { token: t, at: Date.now() };
+    return t;
+  } catch (e) {
+    // Loud fall-through, never silent: the static/gh fallbacks may still work,
+    // but the operator should know the mint path is broken.
+    console.error(`[github-tools] GITHUB_APP_TOKEN_CMD failed (${String(e)}) — falling back to GITHUB_TOKEN / gh CLI`);
+    minted = null;
+    return null;
+  }
+}
 
 // Resolve a GitHub token at call time. Precedence: explicit per-call token >
 // GITHUB_TOKEN env > `gh auth token` from the gh CLI.
@@ -55,11 +91,13 @@ async function ghCliToken(): Promise<string | null> {
   }
 }
 
-async function resolveGithubToken(perCall?: string): Promise<string> {
-  const token = perCall || GITHUB_TOKEN || (await ghCliToken());
+export async function resolveGithubToken(perCall?: string): Promise<string> {
+  // Precedence: explicit per-call > minted-on-demand (never stale) >
+  // static env (may be a stale ~1h installation token) > gh CLI auth.
+  const token = perCall || (await mintedAppToken()) || GITHUB_TOKEN || (await ghCliToken());
   if (!token) {
     throw new Error(
-      "no GitHub token — set GITHUB_TOKEN, pass github_token, or authenticate the gh CLI (gh auth login / gh-app-token.sh in the worktree)",
+      "no GitHub token — set GITHUB_APP_TOKEN_CMD (preferred) or GITHUB_TOKEN, pass github_token, or authenticate the gh CLI (gh auth login / gh-app-token.sh in the worktree)",
     );
   }
   return token;
