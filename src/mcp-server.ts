@@ -157,6 +157,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               "Built-in PR filter already covers: pull_request #N, issue #N (incl. PR comments), check_run.completed for PR #N, " +
               "workflow_run pre/post-merge for PR #N. Use `filter` only to ADD beyond these defaults.",
           },
+          exclude: {
+            type: "string",
+            description: "JS filter expression whose matches are DROPPED even when the built-in PR filter or `filter` would deliver them (AND NOT). Vars: headers, payload. Example: 'payload.sender?.type === \"Bot\"' to drop every bot-authored event; 'payload.action === \"edited\"' to drop all edits. Bot-edited PR comments are already excluded by default.",
+          },
           deploy_workflow_name: {
             type: "string",
             description:
@@ -305,6 +309,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const token = await resolveGithubToken(a.github_token as string | undefined);
 
       const extraFilters = a.filter ? [a.filter as string] : undefined;
+      const excludeFilters = a.exclude ? [a.exclude as string] : undefined;
       const result = await registerPrWebhook({
         githubToken: token,
         repo: a.repo as string,
@@ -313,6 +318,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         wireExternalUrl: WIRE_EXTERNAL_URL,
         name: a.name as string | undefined,
         extraFilters,
+        excludeFilters,
         deployWorkflowName: a.deploy_workflow_name as string | undefined,
       });
 

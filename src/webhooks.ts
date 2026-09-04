@@ -65,6 +65,12 @@ export type PrWebhookOptions = {
   name?: string;
   /** Extra events beyond the PR default set */
   extraEvents?: string[];
+  /**
+   * Exclusion expressions: the whole built-in||extra filter is AND-ed with NOT(any of these).
+   * The only way to REMOVE events (e.g. `payload.sender?.type === "Bot"`), since `extraFilters`
+   * can only add (Brioche 600951, 2026-09-04).
+   */
+  excludeFilters?: string[];
   /** Extra filter expressions OR'd with the PR filter */
   extraFilters?: string[];
   /**
@@ -224,7 +230,8 @@ export async function registerPrWebhook(opts: PrWebhookOptions): Promise<Webhook
     }),
     ...(opts.extraFilters ?? []),
   ];
-  const filter = filters.map((f) => `(${f})`).join(" || ");
+  let filter = filters.map((f) => `(${f})`).join(" || ");
+  if (opts.excludeFilters?.length) filter = `(${filter}) && !(${opts.excludeFilters.map((f) => `(${f})`).join(" || ")})`;
   const webhookUrl = `${opts.wireExternalUrl}/webhooks/${opts.agentId}/github/${name}`;
 
   return registerRepoWebhook({

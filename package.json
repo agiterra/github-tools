@@ -1,6 +1,6 @@
 {
   "name": "@agiterra/github-tools",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "GitHub webhook lifecycle helpers \u2014 register, filter, validate, cleanup. Pure functions, no env reads.",
   "type": "module",
   "main": "./src/index.ts",

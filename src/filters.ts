@@ -27,9 +27,12 @@
  *     on fabrica-v3-api PR #1577.
  */
 export function prFilter(prNumber: number): string {
+  // issue_comment "edited" by a Bot carries no new information for a lane — CodeRabbit edits its
+  // review comment 5+ times per review and Vercel edits its status comment on every deploy
+  // transition, each delivery 25–42 KB (cartellata, soil#1355, 2026-09-04). Human edits still pass.
   return [
     `payload.pull_request?.number === ${prNumber}`,
-    `payload.issue?.number === ${prNumber}`,
+    `(payload.issue?.number === ${prNumber} && !(payload.action === "edited" && payload.sender?.type === "Bot"))`,
     `(payload.check_run?.pull_requests?.some(pr => pr.number === ${prNumber}) && payload.action === "completed" && payload.check_run?.conclusion !== "skipped")`,
   ].join(" || ");
 }
