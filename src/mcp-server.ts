@@ -91,15 +91,50 @@ async function ghCliToken(): Promise<string | null> {
   }
 }
 
-export async function resolveGithubToken(perCall?: string): Promise<string> {
-  // Precedence: explicit per-call > minted-on-demand (never stale) >
-  // static env (may be a stale ~1h installation token) > gh CLI auth.
-  const token = perCall || (await mintedAppToken()) || GITHUB_TOKEN || (await ghCliToken());
-  if (!token) {
-    throw new Error(
-      "no GitHub token — set GITHUB_APP_TOKEN_CMD (preferred) or GITHUB_TOKEN, pass github_token, or authenticate the gh CLI (gh auth login / gh-app-token.sh in the worktree)",
-    );
+/** Shape a token looks like when it is real. The literal string "GITHUB_TOKEN" (pizzicati 2026-09-09),
+ *  "$GITHUB_TOKEN", or an unexpanded `$(…)` are what a lane pastes when the description invites it. */
+export const TOKEN_RE = /^(ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9_]{20,}$|^github_pat_[A-Za-z0-9_]{20,}$/;
+export type TokenSource = "mint" | "per-call" | "static" | "gh-cli";
+export interface TokenDeps {
+  cmdConfigured: boolean;
+  mint: () => Promise<string | null>;
+  staticToken: string;
+  ghCli: () => Promise<string | null>;
+  log?: (msg: string) => void;
+}
+/**
+ * Pure-ish token selection (exported for tests). Precedence when a mint path is CONFIGURED:
+ * mint > static > gh; a per-call token is IGNORED (logged) — a caller-supplied value must never
+ * outrank the always-fresh mint (three field write-ups where a lane passed a stale/bogus token and
+ * got 401 while the mint path stood right there). Without a mint path: per-call > static > gh, and a
+ * per-call value that does not look like a token is refused with a message naming the mistake.
+ */
+export async function selectGithubToken(deps: TokenDeps, perCall?: string): Promise<{ token: string; source: TokenSource }> {
+  const log = deps.log ?? ((m: string) => console.error(`[github-tools] ${m}`));
+  const pc = (perCall ?? "").trim();
+  if (deps.cmdConfigured) {
+    if (pc) log(`per-call github_token IGNORED (mint path configured; ${TOKEN_RE.test(pc) ? "looked like a token" : "did not look like a token: '" + pc.slice(0, 12) + "…'"})`);
+    const t = await deps.mint();
+    if (t) return { token: t, source: "mint" };
+    if (deps.staticToken) { log("mint failed — using static GITHUB_TOKEN (may be stale)"); return { token: deps.staticToken, source: "static" }; }
+    const g = await deps.ghCli(); if (g) { log("mint failed — using gh CLI token"); return { token: g, source: "gh-cli" }; }
+    throw new Error("GitHub App token mint failed and no fallback token is available (GITHUB_APP_TOKEN_CMD is set but printed nothing; static GITHUB_TOKEN unset; gh CLI not authenticated)");
   }
+  if (pc) {
+    if (!TOKEN_RE.test(pc)) throw new Error(`github_token '${pc.slice(0, 16)}…' is not a GitHub token (expected ghs_/ghp_/gho_/github_pat_…). Do not pass the NAME of an env var or an unexpanded $(…); leave github_token unset and configure GITHUB_APP_TOKEN_CMD instead.`);
+    return { token: pc, source: "per-call" };
+  }
+  if (deps.staticToken) return { token: deps.staticToken, source: "static" };
+  const g = await deps.ghCli(); if (g) return { token: g, source: "gh-cli" };
+  throw new Error(
+    "no GitHub token — set GITHUB_APP_TOKEN_CMD (preferred) or GITHUB_TOKEN, or authenticate the gh CLI (gh auth login / gh-app-token.sh in the worktree).",
+  );
+}
+/** Drop the cached minted token so the next selectGithubToken() re-mints (used after a 401). */
+export function invalidateMintedToken(): void { minted = null; }
+export async function resolveGithubToken(perCall?: string): Promise<string> {
+  const { token, source } = await selectGithubToken({ cmdConfigured: Boolean(GITHUB_APP_TOKEN_CMD), mint: mintedAppToken, staticToken: GITHUB_TOKEN, ghCli: ghCliToken }, perCall);
+  console.error(`[github-tools] token source: ${source}`);
   return token;
 }
 
@@ -169,7 +204,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               "workflow_run.name === this value. Omit to receive ALL post-merge " +
               "workflows tagged with the PR number in the merge commit message.",
           },
-          github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
+          github_token: { type: "string", description: "LEAVE UNSET. The server mints a fresh GitHub App installation token itself (GITHUB_APP_TOKEN_CMD); when that path is configured any value here is IGNORED. Only for hosts with no mint path — and then it must be a real token (ghs_/ghp_/gho_/github_pat_), never the name of an env var." },
         },
         required: ["repo", "pr_number"],
       },
@@ -185,7 +220,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           name: { type: "string", description: "Webhook name (used in the Wire URL path)" },
           events: { type: "array", items: { type: "string" }, description: "GitHub events to subscribe to" },
           filter: { type: "string", description: "JS filter expression. Vars: headers, payload." },
-          github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
+          github_token: { type: "string", description: "LEAVE UNSET. The server mints a fresh GitHub App installation token itself (GITHUB_APP_TOKEN_CMD); when that path is configured any value here is IGNORED. Only for hosts with no mint path — and then it must be a real token (ghs_/ghp_/gho_/github_pat_), never the name of an env var." },
         },
         required: ["repo", "name", "events"],
       },
@@ -213,7 +248,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           repo: { type: "string", description: "Repository in owner/repo format" },
           pr_number: { type: "number", description: "PR number to check" },
-          github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
+          github_token: { type: "string", description: "LEAVE UNSET. The server mints a fresh GitHub App installation token itself (GITHUB_APP_TOKEN_CMD); when that path is configured any value here is IGNORED. Only for hosts with no mint path — and then it must be a real token (ghs_/ghp_/gho_/github_pat_), never the name of an env var." },
         },
         required: ["repo", "pr_number"],
         additionalProperties: false,
@@ -249,7 +284,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "Optional URL for the 'Details' link on the check. Useful for linking to a Slack thread or audit log.",
           },
-          github_token: { type: "string", description: "GitHub token. Defaults to GITHUB_TOKEN env var." },
+          github_token: { type: "string", description: "LEAVE UNSET. The server mints a fresh GitHub App installation token itself (GITHUB_APP_TOKEN_CMD); when that path is configured any value here is IGNORED. Only for hosts with no mint path — and then it must be a real token (ghs_/ghp_/gho_/github_pat_), never the name of an env var." },
         },
         required: ["repo", "pr_number", "state"],
         additionalProperties: false,
@@ -306,12 +341,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   try {
     if (name === "register_pr_webhook") {
-      const token = await resolveGithubToken(a.github_token as string | undefined);
+      let token = await resolveGithubToken(a.github_token as string | undefined);
 
       const extraFilters = a.filter ? [a.filter as string] : undefined;
       const excludeFilters = a.exclude ? [a.exclude as string] : undefined;
-      const result = await registerPrWebhook({
-        githubToken: token,
+      let result;
+      try {
+        result = await registerPrWebhook({
+          githubToken: token,
         repo: a.repo as string,
         prNumber: a.pr_number as number,
         agentId: AGENT_ID,
@@ -321,6 +358,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         excludeFilters,
         deployWorkflowName: a.deploy_workflow_name as string | undefined,
       });
+      } catch (e) {
+        // A minted token can be revoked under us (rotation) — re-mint once and retry; never retry a per-call/static token.
+        if (/\(401\)/.test(String((e as Error).message)) && GITHUB_APP_TOKEN_CMD) {
+          console.error("[github-tools] 401 with a minted token — re-minting once and retrying");
+          invalidateMintedToken(); token = await resolveGithubToken(undefined);
+          result = await registerPrWebhook({
+            githubToken: token,
+            repo: a.repo as string,
+            prNumber: a.pr_number as number,
+            agentId: AGENT_ID,
+            wireExternalUrl: WIRE_EXTERNAL_URL,
+            name: a.name as string | undefined,
+            extraFilters,
+            excludeFilters,
+            deployWorkflowName: a.deploy_workflow_name as string | undefined,
+          });
+        } else throw e;
+      }
 
       // Register on Wire
       const wireBody = JSON.stringify(result.wireBody);
