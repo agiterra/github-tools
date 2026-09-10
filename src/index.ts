@@ -1,7 +1,22 @@
 export {
+  unregisterWebhook,
+  type UnregisterDeps,
+  type UnregisterResult,
+} from "./unregister.js";
+
+export {
+  recordHook,
+  lookupHook,
+  forgetHook,
+  ledgerPath,
+  type HookRecord,
+} from "./hook-ledger.js";
+
+export {
   registerRepoWebhook,
   registerPrWebhook,
   deleteGithubWebhook,
+  cleanupCode,
   type RepoWebhookOptions,
   type PrWebhookOptions,
   type WebhookRegistration,

@@ -32,6 +32,8 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { registerPrWebhook, registerRepoWebhook, deleteGithubWebhook, checkPrRebaseState } from "./index.js";
+import { recordHook, lookupHook, forgetHook } from "./hook-ledger.js";
+import { unregisterWebhook } from "./unregister.js";
 import { createAuthJwt, importPrivateKey } from "@agiterra/wire-tools/crypto";
 
 const WIRE_URL = process.env.WIRE_URL ?? "http://localhost:9800";
@@ -258,6 +260,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "unregister_webhook",
       description:
         "Delete a Wire webhook registration. Runs the webhook's cleanup code (typically deletes the GitHub hook). " +
+        "If Wire has already dropped the row (404 — Wire purges webhook rows on session end, reaped-agent cleanup, " +
+        "and its stale-webhook janitor), this falls back to the GitHub hook id recorded locally at registration and " +
+        "deletes the hook itself. When no local record exists it returns a structured error naming the remedy " +
+        "(list the repo's hooks) rather than a bare 404. " +
         "Optionally pass `agent_id` to target another agent's webhook — useful for operators / housekeeping agents " +
         "tidying up stale registrations owned by an offline or out-of-context agent. Wire authorizes any registered " +
         "agent's JWT for this endpoint; the URL path's `:agent_id` locks the target.",
@@ -285,6 +291,18 @@ async function wirePost(path: string, body: string): Promise<Response> {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body,
   });
+}
+
+/**
+ * Record the GitHub hook id locally so unregister can still find it after Wire
+ * has dropped the row (AGI-108). Best-effort — a ledger write must never fail
+ * a registration that already succeeded on both GitHub and Wire.
+ */
+function noteHook(wireWebhookId: number, repo: string, githubHookId: number, name: string): void {
+  const okWrite = recordHook({ wire_webhook_id: wireWebhookId, agent_id: AGENT_ID, repo, github_hook_id: githubHookId, name });
+  if (!okWrite) {
+    console.error(`[github-tools] could not record GitHub hook ${githubHookId} locally — unregister will not be able to recover it from a Wire 404`);
+  }
 }
 
 /** Sign body and DELETE on Wire. */
@@ -350,6 +368,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         throw new Error(`Wire registration failed (${wireRes.status}): ${await wireRes.text()}`);
       }
       const wireHook = (await wireRes.json()) as { webhook_id: number };
+      noteHook(wireHook.webhook_id, a.repo as string, result.githubHookId, result.name);
 
       return {
         content: [{
@@ -379,6 +398,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         throw new Error(`Wire registration failed (${wireRes.status}): ${await wireRes.text()}`);
       }
       const wireHook = (await wireRes.json()) as { webhook_id: number };
+      noteHook(wireHook.webhook_id, a.repo as string, result.githubHookId, result.name);
 
       return {
         content: [{
@@ -408,12 +428,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       // any registered agent's JWT for the auth gate, then enforces that
       // the URL path's agent_id matches the webhook's owner row.
       const ownerId = (a.agent_id as string | undefined) ?? AGENT_ID;
-      const res = await wireDelete(`/agents/${ownerId}/webhooks/${webhookId}`);
-      if (!res.ok) throw new Error(`Wire deletion failed (${res.status}): ${await res.text()}`);
+      const result = await unregisterWebhook(
+        {
+          wireDelete,
+          lookupHook: (id, agent) => lookupHook(id, agent),
+          forgetHook: (id, agent) => { forgetHook(id, agent); },
+          deleteGithubHook: (opts) => deleteGithubWebhook(opts),
+          resolveGithubToken: () => resolveGithubToken(undefined),
+        },
+        { webhookId, agentId: ownerId },
+      );
 
-      return {
-        content: [{ type: "text" as const, text: `Webhook ${webhookId} deleted (owner=${ownerId})` }],
-      };
+      const text = result.structured && !result.ok
+        ? `${result.text}\n${JSON.stringify(result.structured, null, 2)}`
+        : result.text;
+      return { content: [{ type: "text" as const, text }], ...(result.ok ? {} : { isError: true }) };
     }
 
     throw new Error(`unknown tool: ${name}`);

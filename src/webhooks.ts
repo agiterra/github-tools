@@ -111,11 +111,12 @@ return { source: "github" };
 /**
  * Cleanup JS that deletes the GitHub webhook.
  * Runs in Wire's cleanup VM with access to meta, secrets, fetch.
+ * Exported for tests.
  */
-function cleanupCode(): string {
+export function cleanupCode(): string {
   return `
 if (meta.github_hook_id && meta.repo) {
-  await fetch(
+  const res = await fetch(
     "https://api.github.com/repos/" + meta.repo + "/hooks/" + meta.github_hook_id,
     {
       method: "DELETE",
@@ -125,6 +126,17 @@ if (meta.github_hook_id && meta.repo) {
       },
     }
   );
+  // 404 = already gone, which is the outcome we wanted. Anything else must
+  // throw: Wire deletes the row whatever this code does, so a swallowed
+  // failure turns into a "webhook_cleanup_ok" log line next to a GitHub hook
+  // that is still live and still delivering (AGI-108). secrets.github_token
+  // is the installation token captured at REGISTRATION time and these cleanups
+  // can run many hours later, so 401 is the expected failure here.
+  if (!res.ok && res.status !== 404) {
+    throw new Error(
+      "GitHub hook " + meta.github_hook_id + " delete failed (" + res.status + ") for " + meta.repo
+    );
+  }
 }
 `.trim();
 }
