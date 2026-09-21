@@ -55,10 +55,61 @@ export async function unregisterWebhook(
   const res = await deps.wireDelete(`/agents/${agentId}/webhooks/${webhookId}`);
 
   if (res.ok) {
-    // Wire's DELETE handler ran the row's cleanup JS, which deletes the GitHub
-    // hook. The breadcrumb has no further use.
+    // ⛔ WIRE'S 200 MEANS THE ROW IS GONE. IT DOES NOT MEAN THE GITHUB HOOK IS GONE.
+    // This used to assume Wire's cleanup JS had deleted the hook, and dropped the
+    // breadcrumb on that assumption. Measured false three times (2026-09-10, and twice
+    // on 2026-09-21): hook 682772577 on fabrica-v3-contracts stayed ACTIVE after a 200
+    // reporting "deleted".
+    // ★ The deletion of the breadcrumb is the real damage, not the wrong message. With the
+    //   row gone AND the id forgotten, the next call 404s with github_hook_id:null — so the
+    //   tool destroys its own documented recovery path and the caller is left matching
+    //   config.url suffixes by hand. A leaked hook keeps DELIVERING; the repo cap is 20.
+    // ⇒ INVARIANT: never forget the breadcrumb until GitHub is CONFIRMED gone.
+    //   deleteGithubWebhook treats a GitHub 404 as success (verified in webhooks.ts, not
+    //   assumed from its comment), so this is idempotent — when Wire's cleanup DID run, our
+    //   DELETE 404s and costs one call. That is the price of not guessing.
+    const rec = deps.lookupHook(webhookId, agentId);
+    if (!rec) {
+      // No breadcrumb to verify against. Say so; do not claim a GitHub state we never read.
+      return {
+        ok: true,
+        text:
+          `Webhook ${webhookId} deleted from Wire (owner=${agentId}). ` +
+          `GitHub hook NOT VERIFIED — no local record of its id, so Wire's own cleanup is ` +
+          `the only thing that would have removed it. If a hook is still live, list repo hooks ` +
+          `and match config.url ending /webhooks/${agentId}/github/<name>.`,
+        structured: { wire_status: res.status, webhook_id: webhookId, agent_id: agentId, github_hook_id: null, github_verified: false },
+      };
+    }
+    try {
+      const githubToken = await deps.resolveGithubToken();
+      await deps.deleteGithubHook({ githubToken, repo: rec.repo, hookId: rec.github_hook_id });
+    } catch (e) {
+      // ⚠️ KEEP THE BREADCRUMB. This is the branch whose whole purpose is to leave the
+      // caller able to finish the job; forgetting the id here would repeat the defect.
+      return {
+        ok: false,
+        text:
+          `Webhook ${webhookId} deleted from Wire, but GitHub hook ${rec.github_hook_id} ` +
+          `could NOT be deleted (${(e as Error).message}) — it may still be delivering. ` +
+          `Retry, or DELETE /repos/${rec.repo}/hooks/${rec.github_hook_id} directly. ` +
+          `The local record is RETAINED so a retry can still find it.`,
+        structured: {
+          wire_status: res.status, webhook_id: webhookId, agent_id: agentId,
+          github_hook_id: rec.github_hook_id, repo: rec.repo,
+          github_verified: false, record_retained: true, remedy: "retry or delete the hook directly",
+        },
+      };
+    }
     deps.forgetHook(webhookId, agentId);
-    return { ok: true, text: `Webhook ${webhookId} deleted (owner=${agentId})` };
+    return {
+      ok: true,
+      text: `Webhook ${webhookId} deleted (owner=${agentId}); GitHub hook ${rec.github_hook_id} confirmed removed (repo=${rec.repo})`,
+      structured: {
+        wire_status: res.status, webhook_id: webhookId, agent_id: agentId,
+        github_hook_id: rec.github_hook_id, repo: rec.repo, github_verified: true,
+      },
+    };
   }
 
   if (res.status !== 404) {

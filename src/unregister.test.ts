@@ -112,13 +112,43 @@ describe("unregisterWebhook — Wire 404 with no recoverable id", () => {
 });
 
 describe("unregisterWebhook — unchanged paths", () => {
-  test("200 reports the delete and clears the breadcrumb", async () => {
+  // ⛔ THIS TEST USED TO ASSERT THE DEFECT. It required `ghDeletes` to be EMPTY on a 200,
+  // commented "Wire's own cleanup JS did it" — encoding an unverified assumption as a
+  // REQUIREMENT. So the bug shipped with a green suite, three times, and the suite is why
+  // it looked verified. A test that asserts an assumption protects the assumption.
+  test("200 VERIFIES the GitHub hook is gone before clearing the breadcrumb", async () => {
     const { d, store, ghDeletes } = deps({ ledger: [record] });
     const out = await unregisterWebhook(d, { webhookId: WIRE_ID, agentId: AGENT });
     expect(out.ok).toBe(true);
-    expect(out.text).toBe(`Webhook ${WIRE_ID} deleted (owner=${AGENT})`);
-    expect(ghDeletes).toEqual([]);          // Wire's own cleanup JS did it
-    expect(store.has(`${AGENT}:${WIRE_ID}`)).toBe(false);
+    expect(ghDeletes.map((g) => g.hookId)).toEqual([record.github_hook_id]);  // we CHECK, we do not assume
+    expect(ghDeletes[0]?.repo).toBe(record.repo);
+    expect(out.text).toContain("confirmed removed");
+    expect(out.structured?.github_verified).toBe(true);
+    expect(store.has(`${AGENT}:${WIRE_ID}`)).toBe(false); // cleared only after confirmation
+  });
+
+  // ⛔ THE BRANCH THE WHOLE FIX EXISTS FOR. Brioche's lane lost the hook id exactly here:
+  // row gone, hook alive, breadcrumb destroyed, next call 404s with github_hook_id:null.
+  test("200 with a FAILING GitHub delete RETAINS the breadcrumb and reports not-ok", async () => {
+    const { d, store } = deps({
+      ledger: [record],
+      deleteGithubHook: async () => { throw new Error("502 bad gateway"); },
+    });
+    const out = await unregisterWebhook(d, { webhookId: WIRE_ID, agentId: AGENT });
+    expect(out.ok).toBe(false);
+    expect(out.structured?.github_hook_id).toBe(record.github_hook_id);  // id SURVIVES
+    expect(out.structured?.record_retained).toBe(true);
+    expect(store.has(`${AGENT}:${WIRE_ID}`)).toBe(true);                 // breadcrumb kept
+    expect(out.text).toContain("may still be delivering");
+  });
+
+  test("200 with NO breadcrumb says GitHub is unverified rather than claiming success", async () => {
+    const { d, ghDeletes } = deps({ ledger: [] });
+    const out = await unregisterWebhook(d, { webhookId: WIRE_ID, agentId: AGENT });
+    expect(out.ok).toBe(true);                       // the Wire row really is gone
+    expect(ghDeletes).toEqual([]);                   // nothing to delete against
+    expect(out.structured?.github_verified).toBe(false);
+    expect(out.text).toContain("NOT VERIFIED");
   });
 
   test("a non-404 failure still surfaces status and body verbatim", async () => {
