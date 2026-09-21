@@ -157,7 +157,44 @@ export type WebhookRegistration = {
  * 2. Returns the Wire registration body — caller is responsible for
  *    signing (JWT) and POSTing to Wire's webhook registration endpoint.
  */
+/**
+ * Is this callback URL one GitHub could actually reach?
+ *
+ * ⛔ WHY (ENG-4094, filed 2026-09-08; answered 2026-09-21). A Codex lane registered a PR
+ * webhook whose callback was `http://localhost:9800/...` and GitHub 422'd it. The cause is
+ * a DEFAULT, not a bug in the URL construction: `WIRE_EXTERNAL_URL ?? WIRE_URL`, and
+ * WIRE_URL is localhost. Nothing has ever guarded it.
+ * ⚠️ IT HAS LOOKED FIXED ALL CYCLE BECAUSE THE ENVIRONMENT MASKS IT — every crew spawn sets
+ * WIRE_EXTERNAL_URL=https://patisserie.ngrok.io, so the fallback never fires. A lane spawned
+ * by any path that omits that var silently gets a localhost callback and a 422 from GitHub
+ * whose text says nothing about the cause. Absence of the symptom is not a fix.
+ * ⇒ Refuse before calling GitHub, and name the variable. A legible refusal beats a remote
+ *   422 that the caller has to reverse-engineer.
+ */
+export function isReachableCallbackUrl(url: string): { ok: boolean; reason?: string } {
+  let u: URL;
+  try { u = new URL(url); } catch { return { ok: false, reason: `not a valid URL: ${url}` }; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return { ok: false, reason: `unsupported scheme '${u.protocol}'` };
+  const h = u.hostname.toLowerCase();
+  const priv =
+    h === "localhost" || h === "::1" || h.endsWith(".local") || h.endsWith(".internal") ||
+    /^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) ||
+    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(h) || /^169\.254\./.test(h);
+  if (priv) {
+    return {
+      ok: false,
+      reason:
+        `callback host '${h}' is not reachable from GitHub (GitHub will 422). ` +
+        `This is almost always WIRE_EXTERNAL_URL being unset — it falls back to WIRE_URL, ` +
+        `which is localhost. Set WIRE_EXTERNAL_URL to the externally-reachable Wire URL.`,
+    };
+  }
+  return { ok: true };
+}
+
 export async function registerRepoWebhook(opts: RepoWebhookOptions): Promise<WebhookRegistration> {
+  const reach = isReachableCallbackUrl(opts.webhookUrl);
+  if (!reach.ok) throw new Error(`refusing to register an unreachable webhook: ${reach.reason}`);
   const webhookSecret = crypto.randomUUID();
 
   // Create GitHub webhook
