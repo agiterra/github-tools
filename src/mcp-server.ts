@@ -48,6 +48,19 @@ let signingKey: CryptoKey | null = null;
 // refresh at 50min so a token is never presented near expiry.
 const MINT_TTL_MS = 50 * 60_000;
 let minted: { token: string; at: number } | null = null;
+// Why the last mint failed, in the command's own words (its stderr), so the tool ERROR can carry it. Before this,
+// the cause reached only the server's stderr log, and the caller saw a generic "printed nothing": a persona pod whose
+// gh shim refuses by policy (mode none, Vacherin 767791) explains itself on stderr, and that text never arrived.
+let lastMintError: string | null = null;
+/** A failed mint's cause on one line: every non-empty stderr line joined with " | " (a wrapper's explanation usually
+ *  comes FIRST and the wrapped tool's terse error last, so no single line is enough), else the error's first line.
+ *  Capped at 400 chars. Exported for tests. */
+export function mintFailureReason(e: unknown): string {
+  const err = (e as { stderr?: unknown })?.stderr;
+  const lines = (typeof err === "string" ? err : Buffer.isBuffer(err) ? err.toString("utf8") : "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const msg = e instanceof Error ? e.message.split("\n")[0] : String(e);
+  return (lines.length ? lines.join(" | ") : msg).slice(0, 400);
+}
 
 async function mintedAppToken(): Promise<string | null> {
   if (!GITHUB_APP_TOKEN_CMD) return null;
@@ -60,12 +73,14 @@ async function mintedAppToken(): Promise<string | null> {
     const t = stdout.trim();
     if (!t) throw new Error("command printed no token");
     minted = { token: t, at: Date.now() };
+    lastMintError = null;
     return t;
   } catch (e) {
     // Loud fall-through, never silent: the static/gh fallbacks may still work,
     // but the operator should know the mint path is broken.
     console.error(`[github-tools] GITHUB_APP_TOKEN_CMD failed (${String(e)}) — falling back to GITHUB_TOKEN / gh CLI`);
     minted = null;
+    lastMintError = mintFailureReason(e);
     return null;
   }
 }
@@ -103,6 +118,8 @@ export interface TokenDeps {
   staticToken: string;
   ghCli: () => Promise<string | null>;
   log?: (msg: string) => void;
+  /** Why the last mint failed (the command's stderr), for the error text. */
+  mintError?: () => string | null;
 }
 /**
  * Pure-ish token selection (exported for tests). Precedence when a mint path is CONFIGURED:
@@ -120,7 +137,8 @@ export async function selectGithubToken(deps: TokenDeps, perCall?: string): Prom
     if (t) return { token: t, source: "mint" };
     if (deps.staticToken) { log("mint failed — using static GITHUB_TOKEN (may be stale)"); return { token: deps.staticToken, source: "static" }; }
     const g = await deps.ghCli(); if (g) { log("mint failed — using gh CLI token"); return { token: g, source: "gh-cli" }; }
-    throw new Error("GitHub App token mint failed and no fallback token is available (GITHUB_APP_TOKEN_CMD is set but printed nothing; static GITHUB_TOKEN unset; gh CLI not authenticated)");
+    const why = deps.mintError?.();
+    throw new Error(`GitHub App token mint failed and no fallback token is available (GITHUB_APP_TOKEN_CMD is set but printed nothing; static GITHUB_TOKEN unset; gh CLI not authenticated)${why ? `. Mint command said: ${why}` : ""}`);
   }
   if (pc) {
     if (!TOKEN_RE.test(pc)) throw new Error(`github_token '${pc.slice(0, 16)}…' is not a GitHub token (expected ghs_/ghp_/gho_/github_pat_…). Do not pass the NAME of an env var or an unexpanded $(…); leave github_token unset and configure GITHUB_APP_TOKEN_CMD instead.`);
@@ -135,7 +153,7 @@ export async function selectGithubToken(deps: TokenDeps, perCall?: string): Prom
 /** Drop the cached minted token so the next selectGithubToken() re-mints (used after a 401). */
 export function invalidateMintedToken(): void { minted = null; }
 export async function resolveGithubToken(perCall?: string): Promise<string> {
-  const { token, source } = await selectGithubToken({ cmdConfigured: Boolean(GITHUB_APP_TOKEN_CMD), mint: mintedAppToken, staticToken: GITHUB_TOKEN, ghCli: ghCliToken }, perCall);
+  const { token, source } = await selectGithubToken({ cmdConfigured: Boolean(GITHUB_APP_TOKEN_CMD), mint: mintedAppToken, staticToken: GITHUB_TOKEN, ghCli: ghCliToken, mintError: () => lastMintError }, perCall);
   console.error(`[github-tools] token source: ${source}`);
   return token;
 }

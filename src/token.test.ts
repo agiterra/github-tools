@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { selectGithubToken, TOKEN_RE } from "./mcp-server";
+import { selectGithubToken, mintFailureReason, TOKEN_RE } from "./mcp-server";
 
 const quiet = () => {};
 const REAL = "ghs_" + "A".repeat(36);
@@ -14,6 +14,23 @@ describe("selectGithubToken — mint path configured", () => {
     expect((await selectGithubToken({ cmdConfigured: true, mint: async () => null, staticToken: "ghp_x", ghCli: async () => null, log: quiet })).source).toBe("static");
     expect((await selectGithubToken({ cmdConfigured: true, mint: async () => null, staticToken: "", ghCli: async () => "gho_y", log: quiet })).source).toBe("gh-cli");
     await expect(selectGithubToken({ cmdConfigured: true, mint: async () => null, staticToken: "", ghCli: async () => null, log: quiet })).rejects.toThrow(/mint failed and no fallback/);
+  });
+});
+describe("mint failure reason reaches the error (Vacherin 767791)", () => {
+  const POLICY = "gh (pod): this persona has no standing GitHub identity (policy). Mint per use: GH_TOKEN=... gh ...";
+  test("the mint command's stderr is in the thrown error", async () => {
+    await expect(selectGithubToken({ cmdConfigured: true, mint: async () => null, staticToken: "", ghCli: async () => null, log: quiet, mintError: () => POLICY }))
+      .rejects.toThrow(/Mint command said: gh \(pod\): this persona has no standing GitHub identity \(policy\)/);
+  });
+  test("no recorded reason -> the old text, no dangling suffix", async () => {
+    const e = await selectGithubToken({ cmdConfigured: true, mint: async () => null, staticToken: "", ghCli: async () => null, log: quiet, mintError: () => null }).catch((x) => x as Error);
+    expect(e.message).toMatch(/gh CLI not authenticated\)$/);
+  });
+  test("mintFailureReason: every stderr line, wrapper's explanation first, over the execFile message", () => {
+    const e = Object.assign(new Error("Command failed: bash -c gh auth token\nmore"), { stderr: `${POLICY}\nno oauth token found for github.com\n\n` });
+    expect(mintFailureReason(e)).toBe(`${POLICY} | no oauth token found for github.com`);
+    expect(mintFailureReason(Object.assign(new Error("Command failed: x\ny"), { stderr: "" }))).toBe("Command failed: x");
+    expect(mintFailureReason(new Error("command printed no token"))).toBe("command printed no token");
   });
 });
 describe("selectGithubToken — no mint path", () => {
